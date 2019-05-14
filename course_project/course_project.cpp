@@ -38,18 +38,19 @@ const int ROW_NUM = 100;
 void shape(int t, int *from, int *to) {
     t -= ROW_NUM / 2;
     int l = (int)std::max(1.0, sqrt(pow(ROW_NUM / 2.0, 2) - pow(t, 2)));
-    l *= 2;
+    l += (int)(20 * fabs(cos(t / 10.0)));
     *from = -l;
     *to = l;
 }
 
 
 float border(int x, int y) {
-    return sqrt(x * x + y * y);
+    // return sqrt(x * x + y * y);
+    return fabs(sin(x / 5.0)) * 200;
 }
 
 
-struct TProcess {
+class TProcess {
 private:
     typedef float TCell;
 
@@ -63,6 +64,9 @@ private:
     TCell *data[2];
     int curStepDataPtrId;
 
+    int *sendSizes, *shiftForSend;
+    int *recvSizes, *shiftForRecv;
+
     void calcCurrentBlock() {
         int curBlockSize = (rowNum - 2) / N_PROC;
         debug0("curBlockSize = %d\n", curBlockSize);
@@ -74,19 +78,20 @@ private:
     }
 
     TCell* allocDataArray(int dataSize) {
-        TCell *data = (TCell*)malloc(dataSize * sizeof(TCell));
-
-        if (data == NULL) {
+        TCell *d;
+        try {
+            d = new TCell[dataSize];
+        } catch (std::bad_alloc& ba) {
             printf("%d can't allocate %d bytes\n",
                    PROC_ID + 1, dataSize * sizeof(TCell));
             mpi_exit(1);
         }
 
-        memset(data, 0, dataSize * sizeof(TCell));
+        memset(d, 0, dataSize * sizeof(TCell));
         log("Successfully allocated %d bytes",
             dataSize * sizeof(TCell));
 
-        return data;
+        return d;
     }
 
     inline int idx(int curRow, int curShift) {
@@ -157,6 +162,42 @@ private:
         }
 
         curStepDataPtrId ^= 1;
+        sendReceiveData();
+    }
+
+    void initAllToAllv() {
+        sendSizes = new int[N_PROC];
+        shiftForSend = new int[N_PROC];
+
+        recvSizes = new int[N_PROC];
+        shiftForRecv = new int[N_PROC];
+
+        memset(sendSizes, 0, N_PROC * sizeof(int));
+        memset(shiftForSend, 0, N_PROC * sizeof(int));
+
+        memset(recvSizes, 0, N_PROC * sizeof(int));
+        memset(shiftForRecv, 0, N_PROC * sizeof(int));
+
+        if (PROC_ID > 0) {
+            sendSizes[PROC_ID - 1] = length[blockFrom + 1];
+            shiftForSend[PROC_ID - 1] = blockPrefixLength[1];
+            recvSizes[PROC_ID - 1] = length[blockFrom];
+            shiftForRecv[PROC_ID - 1] = blockPrefixLength[0];
+        }
+        if (PROC_ID < N_PROC - 1) {
+            sendSizes[PROC_ID + 1] = length[blockTo - 1];
+            shiftForSend[PROC_ID + 1] = blockPrefixLength[blockTo - blockFrom - 1];
+            recvSizes[PROC_ID + 1] = length[blockTo];
+            shiftForRecv[PROC_ID + 1] = blockPrefixLength[blockTo - blockFrom];
+        }
+    }
+
+    void sendReceiveData() {
+        MPI_Alltoallv(
+            data[curStepDataPtrId], sendSizes, shiftForSend, MPI_FLOAT,
+            data[curStepDataPtrId], recvSizes, shiftForRecv, MPI_FLOAT,
+            MPI_COMM_WORLD);
+        log("has sent/receive all data", "");
     }
 
     void writeRows(FILE *fs, int from, int to) {
@@ -198,6 +239,7 @@ public:
         }
 
         initDataArray(border);
+        initAllToAllv();
     }
 
     void run(int maxIterNum, double eps) {
@@ -237,8 +279,12 @@ public:
 
     ~TProcess() {
         forn(i, 2) {
-            free(data[i]);
+            if (data[i]) delete[] data[i];
         }
+        if (sendSizes) delete[] sendSizes;
+        if (recvSizes) delete[] recvSizes;
+        if (shiftForSend) delete[] shiftForSend;
+        if (shiftForRecv) delete[] shiftForRecv;
     }
 };
 
